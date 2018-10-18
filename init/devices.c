@@ -15,12 +15,13 @@
  */
 
 #include <errno.h>
+#include <fnmatch.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-
+#include <sys/system_properties.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -40,16 +41,26 @@
 #include <sys/wait.h>
 
 #include <cutils/list.h>
+#include <cutils/probe_module.h>
 #include <cutils/uevent.h>
 
 #include "devices.h"
 #include "util.h"
 #include "log.h"
+#include "parser.h"
 
 #define SYSFS_PREFIX    "/sys"
+#ifdef __i386__
+#define FIRMWARE_DIR1   "/system/lib/firmware"
+#else
 #define FIRMWARE_DIR1   "/etc/firmware"
+#endif
 #define FIRMWARE_DIR2   "/vendor/firmware"
 #define FIRMWARE_DIR3   "/firmware/image"
+
+#define MODULES_BLKLST  "/system/etc/modules.blacklist"
+#define READ_MODULES_ALIAS    1
+#define READ_MODULES_BLKLST   2
 
 extern struct selabel_handle *sehandle;
 
@@ -62,6 +73,8 @@ struct uevent {
     const char *firmware;
     const char *partition_name;
     const char *device_name;
+    const char *modalias;
+    const char *product;
     int partition_num;
     int major;
     int minor;
@@ -73,7 +86,7 @@ struct perms_ {
     mode_t perm;
     unsigned int uid;
     unsigned int gid;
-    unsigned short prefix;
+    unsigned short wildcard;
 };
 
 struct perm_node {
@@ -88,13 +101,30 @@ struct platform_node {
     struct listnode list;
 };
 
+struct module_alias_node {
+    char *name;
+    char *pattern;
+    struct listnode list;
+};
+
+struct module_blacklist_node {
+    char *name;
+    struct listnode list;
+};
+
 static list_declare(sys_perms);
 static list_declare(dev_perms);
 static list_declare(platform_names);
+static list_declare(modules_aliases_map);
+static list_declare(modules_blacklist);
+static list_declare(deferred_module_loading_list);
+
+static int read_modules_aliases();
+static int read_modules_blacklist();
 
 int add_dev_perms(const char *name, const char *attr,
                   mode_t perm, unsigned int uid, unsigned int gid,
-                  unsigned short prefix) {
+                  unsigned short wildcard) {
     struct perm_node *node = calloc(1, sizeof(*node));
     if (!node)
         return -ENOMEM;
@@ -112,7 +142,7 @@ int add_dev_perms(const char *name, const char *attr,
     node->dp.perm = perm;
     node->dp.uid = uid;
     node->dp.gid = gid;
-    node->dp.prefix = prefix;
+    node->dp.wildcard = wildcard;
 
     if (attr)
         list_add_tail(&sys_perms, &node->plist);
@@ -133,8 +163,8 @@ void fixup_sys_perms(const char *upath)
          */
     list_for_each(node, &sys_perms) {
         dp = &(node_to_item(node, struct perm_node, plist))->dp;
-        if (dp->prefix) {
-            if (strncmp(upath, dp->name + 4, strlen(dp->name + 4)))
+        if (dp->wildcard) {
+            if (fnmatch(dp->name + 4, upath, 0) != 0)
                 continue;
         } else {
             if (strcmp(upath, dp->name + 4))
@@ -165,8 +195,8 @@ static mode_t get_device_perm(const char *path, unsigned *uid, unsigned *gid)
         perm_node = node_to_item(node, struct perm_node, plist);
         dp = &perm_node->dp;
 
-        if (dp->prefix) {
-            if (strncmp(path, dp->name, strlen(dp->name)))
+        if (dp->wildcard) {
+            if (fnmatch(dp->name, path, 0) != 0)
                 continue;
         } else {
             if (strcmp(path, dp->name))
@@ -315,7 +345,8 @@ static void parse_event(const char *msg, struct uevent *uevent)
     uevent->partition_name = NULL;
     uevent->partition_num = -1;
     uevent->device_name = NULL;
-
+    uevent->modalias = NULL;
+    uevent->product = NULL;
         /* currently ignoring SEQNUM */
     while(*msg) {
         if(!strncmp(msg, "ACTION=", 7)) {
@@ -345,6 +376,12 @@ static void parse_event(const char *msg, struct uevent *uevent)
         } else if(!strncmp(msg, "DEVNAME=", 8)) {
             msg += 8;
             uevent->device_name = msg;
+        } else if(!strncmp(msg, "PRODUCT=", 8)) {
+            msg += 8;
+            uevent->product = msg;
+        } else if(!strncmp(msg, "MODALIAS=", 9)) {
+            msg += 9;
+            uevent->modalias = msg;
         }
 
         /* advance to after the next \0 */
@@ -465,13 +502,38 @@ static char **parse_platform_block_device(struct uevent *uevent)
     return links;
 }
 
+static char **parse_gpt_block_device(struct uevent *uevent)
+{
+    char **links = calloc(2, sizeof(char *));
+
+    if (!links)
+        return NULL;
+
+    if (uevent->partition_name) {
+        char prefix[PROP_VALUE_MAX];
+        int len;
+        len = __system_property_get("ro.boot.install_id", prefix);
+        if (!len || strncmp(prefix, uevent->partition_name, len))
+            return NULL;
+        if (asprintf(&links[0], "/dev/block/by-name/%s",
+                    uevent->partition_name + len) < 0) {
+            free(links);
+            return NULL;
+        }
+    }
+    return links;
+}
+
+
 static void handle_device(const char *action, const char *devpath,
         const char *path, int block, int major, int minor, char **links)
 {
     int i;
 
     if(!strcmp(action, "add")) {
-        make_device(devpath, path, block, major, minor);
+        if (major >= 0 && minor >= 0)
+            make_device(devpath, path, block, major, minor);
+        __system_property_set("ctl.dev_added",devpath);
         if (links) {
             for (i = 0; links[i]; i++)
                 make_link(devpath, links[i]);
@@ -483,7 +545,9 @@ static void handle_device(const char *action, const char *devpath,
             for (i = 0; links[i]; i++)
                 remove_link(devpath, links[i]);
         }
-        unlink(devpath);
+        __system_property_set("ctl.dev_removed",devpath);
+        if (major >= 0 && minor >= 0)
+            unlink(devpath);
     }
 
     if (links) {
@@ -506,10 +570,6 @@ static void handle_platform_device_event(struct uevent *uevent)
 static const char *parse_device_name(struct uevent *uevent, unsigned int len)
 {
     const char *name;
-
-    /* if it's not a /dev device, nothing else to do */
-    if((uevent->major < 0) || (uevent->minor < 0))
-        return NULL;
 
     /* do we have a name? */
     name = strrchr(uevent->path, '/');
@@ -538,7 +598,8 @@ static void handle_block_device_event(struct uevent *uevent)
     snprintf(devpath, sizeof(devpath), "%s%s", base, name);
     make_dir(base, 0755);
 
-    if (!strncmp(uevent->path, "/devices/", 9))
+    links = parse_gpt_block_device(uevent);
+    if (!links && !strncmp(uevent->path, "/devices/", 9))
         links = parse_platform_block_device(uevent);
 
     handle_device(uevent->action, devpath, uevent->path, 1,
@@ -635,8 +696,187 @@ static void handle_generic_device_event(struct uevent *uevent)
              uevent->major, uevent->minor, links);
 }
 
+static int is_module_blacklisted(const char *name)
+{
+    struct listnode *blklst_node;
+    struct module_blacklist_node *blacklist;
+    int ret = 0;
+
+    if (!name) goto out;
+
+    /* See if module is blacklisted, skip if it is */
+    list_for_each(blklst_node, &modules_blacklist) {
+        blacklist = node_to_item(blklst_node,
+                                 struct module_blacklist_node,
+                                 list);
+        if (!strcmp(name, blacklist->name)) {
+            INFO("modules %s is blacklisted\n", name);
+            ret = 1;
+            goto out;
+        }
+    }
+
+out:
+    return ret;
+}
+
+static int do_load_module_by_device_modalias(const char *id)
+{
+    struct listnode *alias_node;
+    struct module_alias_node *alias;
+    int ret = -1;
+
+    list_for_each(alias_node, &modules_aliases_map) {
+        alias = node_to_item(alias_node, struct module_alias_node, list);
+
+        if (alias && alias->name && alias->pattern) {
+            if (fnmatch(alias->pattern, id, 0) == 0) {
+                INFO("trying to load module %s due to uevents\n", alias->name);
+
+                if (!is_module_blacklisted(alias->name)) {
+                    if (insmod_by_dep(alias->name, "", NULL, 0, NULL)) {
+                        /* cannot load module. try another one since
+                         * there may be another match.
+                         */
+                        INFO("cannot load module %s due to uevents\n",
+                             alias->name);
+                    } else {
+                        /* loading was successful */
+                        INFO("loaded module %s due to uevents\n", alias->name);
+                        ret = 0;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    return ret;
+}
+
+static void load_module_by_device_modalias(const char *id)
+{
+    if (id) {
+        pid_t pid = fork();
+        if (!pid) {
+            exit(do_load_module_by_device_modalias(id));
+        } else if (pid < 0) {
+            ERROR("failed to fork for loading %s\n", id);
+        }
+    }
+}
+
+static void handle_deferred_module_loading()
+{
+    /* try to read the module alias mapping if map is empty
+     * if succeed, loading all the modules in the queue
+     */
+    if (!list_empty(&modules_aliases_map)) {
+        struct listnode *node = NULL;
+        struct listnode *next = NULL;
+        struct module_alias_node *alias = NULL;
+
+        list_for_each_safe(node, next, &deferred_module_loading_list) {
+            alias = node_to_item(node, struct module_alias_node, list);
+
+            if (alias && alias->pattern) {
+                INFO("deferred loading of module for %s\n", alias->pattern);
+                load_module_by_device_modalias(alias->pattern);
+                free(alias->pattern);
+                list_remove(node);
+                free(alias);
+            }
+        }
+    }
+}
+
+int module_probe(const char *modalias)
+{
+    if (list_empty(&modules_aliases_map)) {
+        if (read_modules_aliases() == 0)
+            read_modules_blacklist();
+        else
+            return -1;
+    }
+
+    return modalias ? do_load_module_by_device_modalias(modalias) : -1;
+}
+
+static void handle_module_loading(const char *modalias)
+{
+    char *tmp;
+    struct module_alias_node *node;
+
+    /* once modules.alias can be read,
+     * we load all the deferred ones
+     */
+    if (list_empty(&modules_aliases_map)) {
+        if (read_modules_aliases() == 0) {
+            read_modules_blacklist();
+            handle_deferred_module_loading();
+        }
+    }
+
+    if (!modalias) return;
+
+    if (list_empty(&modules_aliases_map)) {
+        /* if module alias mapping is empty,
+         * queue it for loading later
+         */
+        node = calloc(1, sizeof(*node));
+        if (node) {
+            node->pattern = strdup(modalias);
+            if (!node->pattern) {
+                free(node);
+            } else {
+                list_add_tail(&deferred_module_loading_list, &node->list);
+                INFO("add to queue for deferred module loading: %s",
+                        node->pattern);
+            }
+        } else {
+            ERROR("failed to allocate memory to store device id for deferred module loading.\n");
+        }
+    } else {
+        load_module_by_device_modalias(modalias);
+    }
+
+}
+
+static void fixup_device_perms(struct uevent *uevent)
+{
+    int i, retval;
+    /* O(n) search to set the permission of device */
+    if((dev_index) && (uevent->product!=NULL)) {
+        for (i = 0; i < dev_index; i++) {
+            if(!strncmp(uevent->product,dev_id[i].dev_name,strlen(dev_id[i].dev_name))) {
+                if (uevent->device_name != NULL) {
+                    char *dev_path = malloc((6+strlen(uevent->device_name)));
+                    if (dev_path == NULL) {
+                        ERROR("Memory allocation failed for Dev path \n");
+                    }
+                    strcpy(dev_path, "/dev/");
+                    strcat(dev_path, uevent->device_name);
+                    retval = chown(dev_path, dev_id[i].user_config,
+                          dev_id[i].grp_config);
+                    if (retval != 0)
+                        ERROR("chown: %s\n", strerror(errno));
+                    retval = chmod(dev_path, dev_id[i].perm);
+                    if (retval != 0)
+                        ERROR("chmod: %s\n", strerror(errno));
+                    free(dev_path);
+                }
+                break;
+            }
+        }
+    }
+}
+
 static void handle_device_event(struct uevent *uevent)
 {
+    if (!strcmp(uevent->action,"add")) {
+        handle_module_loading(uevent->modalias);
+    }
+
     if (!strcmp(uevent->action,"add") || !strcmp(uevent->action, "change"))
         fixup_sys_perms(uevent->path);
 
@@ -646,6 +886,10 @@ static void handle_device_event(struct uevent *uevent)
         handle_platform_device_event(uevent);
     } else {
         handle_generic_device_event(uevent);
+    }
+
+    if (!strcmp(uevent->action,"add")) {
+        fixup_device_perms(uevent);
     }
 }
 
@@ -776,6 +1020,7 @@ loading_close_out:
 file_free_out:
     free(file1);
     free(file2);
+    free(file3);
 data_free_out:
     free(data);
 loading_free_out:
@@ -801,6 +1046,146 @@ static void handle_firmware_event(struct uevent *uevent)
         process_firmware_event(uevent);
         exit(EXIT_SUCCESS);
     }
+}
+
+static void parse_line_module_alias(struct parse_state *state, int nargs, char **args)
+{
+    struct module_alias_node *node;
+
+    if (!args ||
+        (nargs != 3) ||
+        !args[0] || !args[1] || !args[2]) {
+        /* empty line or not enough arguments */
+        return;
+    }
+
+    node = calloc(1, sizeof(*node));
+    if (!node) return;
+
+    node->name = strdup(args[2]);
+    if (!node->name) {
+        free(node);
+        return;
+    }
+
+    node->pattern = strdup(args[1]);
+    if (!node->pattern) {
+        free(node->name);
+        free(node);
+        return;
+    }
+
+    list_add_tail(&modules_aliases_map, &node->list);
+}
+
+static void parse_line_module_blacklist(struct parse_state *state, int nargs, char **args)
+{
+    struct module_blacklist_node *node;
+
+    if (!args ||
+        (nargs != 2) ||
+        !args[0] || !args[1]) {
+        /* empty line or not enough arguments */
+        return;
+    }
+
+    /* this line does not being with "blacklist" */
+    if (strncmp(args[0], "blacklist", 9)) return;
+
+    node = calloc(1, sizeof(*node));
+    if (!node) return;
+
+    node->name = strdup(args[1]);
+    if (!node->name) {
+        free(node);
+        return;
+    }
+
+    list_add_tail(&modules_blacklist, &node->list);
+}
+
+static int __read_modules_desc_file(int mode)
+{
+    struct parse_state state;
+    char *args[3];
+    int nargs;
+    char *data = NULL;
+    char fn[PATH_MAX];
+    int fd = -1;
+    int ret = -1;
+    int args_to_read = 0;
+
+    if (mode == READ_MODULES_ALIAS) {
+        /* read modules.alias */
+        strcat(get_default_mod_path(fn), "modules.alias");
+    } else if (mode == READ_MODULES_BLKLST) {
+        /* read modules.blacklist */
+        strcpy(fn, MODULES_BLKLST);
+    } else {
+        /* unknown mode */
+        goto out;
+    }
+
+    fd = open(fn, O_RDONLY);
+    if (fd == -1) {
+        goto out;
+    }
+
+    /* read the whole file */
+    data = read_file(fn, 0);
+    if (!data) {
+        goto out;
+    }
+
+    /* invoke tokenizer */
+    nargs = 0;
+    state.filename = fn;
+    state.line = 1;
+    state.ptr = data;
+    state.nexttoken = 0;
+    if (mode == READ_MODULES_ALIAS) {
+        state.parse_line = parse_line_module_alias;
+        args_to_read = 3;
+    } else if (mode == READ_MODULES_BLKLST) {
+        state.parse_line = parse_line_module_blacklist;
+        args_to_read = 2;
+    }
+    for (;;) {
+        int token = next_token(&state);
+        switch (token) {
+        case T_EOF:
+            state.parse_line(&state, 0, 0);
+            ret = 0;
+            goto out;
+        case T_NEWLINE:
+            if (nargs) {
+                state.parse_line(&state, nargs, args);
+                nargs = 0;
+            }
+            break;
+        case T_TEXT:
+            if (nargs < args_to_read) {
+                args[nargs++] = state.text;
+            }
+            break;
+        }
+    }
+    ret = 0;
+
+out:
+    if (fd != -1) {
+        close(fd);
+    }
+    free(data);
+    return ret;
+}
+
+static int read_modules_aliases() {
+    return __read_modules_desc_file(READ_MODULES_ALIAS);
+}
+
+static int read_modules_blacklist() {
+    return __read_modules_desc_file(READ_MODULES_BLKLST);
 }
 
 #define UEVENT_MSG_LEN  1024
@@ -866,7 +1251,7 @@ static void do_coldboot(DIR *d)
     }
 }
 
-static void coldboot(const char *path)
+void coldboot(const char *path)
 {
     DIR *d = opendir(path);
     if(d) {
@@ -886,8 +1271,8 @@ void device_init(void)
         sehandle = selinux_android_file_context_handle();
     }
 
-    /* is 256K enough? udev uses 16MB! */
-    device_fd = uevent_open_socket(256*1024, true);
+    /* is 1MB enough? udev uses 16MB! */
+    device_fd = uevent_open_socket(1024*1024, true);
     if(device_fd < 0)
         return;
 

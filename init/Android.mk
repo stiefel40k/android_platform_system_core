@@ -10,7 +10,6 @@ LOCAL_SRC_FILES:= \
 	property_service.c \
 	util.c \
 	parser.c \
-	logo.c \
 	keychords.c \
 	signal_handler.c \
 	init_parser.c \
@@ -61,3 +60,14 @@ ALL_DEFAULT_INSTALLED_MODULES += $(SYMLINKS)
 # local module name
 ALL_MODULES.$(LOCAL_MODULE).INSTALLED := \
     $(ALL_MODULES.$(LOCAL_MODULE).INSTALLED) $(SYMLINKS)
+
+# make a link of modprobe to init
+SYMLINK_MODPROBE := $(TARGET_ROOT_OUT)/sbin/modprobe
+$(SYMLINK_MODPROBE): MODPROBE_BINARY := $(LOCAL_MODULE)
+$(SYMLINK_MODPROBE): $(LOCAL_INSTALLED_MODULE) $(LOCAL_PATH)/Android.mk
+	@echo "Symlink: $@ -> ../$(MODPROBE_BINARY)"
+	@mkdir -p $(dir $@)
+	@rm -rf $@
+	$(hide) ln -sf ../$(MODPROBE_BINARY) $@
+
+ALL_DEFAULT_INSTALLED_MODULES += $(SYMLINK_MODPROBE)

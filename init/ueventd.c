@@ -21,7 +21,8 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <signal.h>
-
+#include <libgen.h>
+#include <errno.h>
 #include <private/android_filesystem_config.h>
 
 #include "ueventd.h"
@@ -30,8 +31,12 @@
 #include "devices.h"
 #include "ueventd_parser.h"
 
+#define UEV_VPID "__uevent_add_VID_PID__"
+
 static char hardware[32];
 static unsigned revision = 0;
+int dev_index = 0;
+struct dev_prop dev_id[MAX_DEV];
 
 static void import_kernel_nv(char *name, int in_qemu)
 {
@@ -52,6 +57,30 @@ int ueventd_main(int argc, char **argv)
     struct pollfd ufd;
     int nr;
     char tmp[32];
+
+    /* kernel will launch a program in user space to load
+     * modules, by default it is modprobe.
+     * Kernel doesn't send module parameters, so we don't
+     * need to support them.
+     * No deferred loading in this case.
+     */
+    if (!strcmp(basename(argv[0]), "modprobe")) {
+        if (argc >= 4
+                && argv[3] != NULL
+                && *argv[3] != '\0') {
+            uid_t uid;
+
+            /* We only accept requests from root user (kernel) */
+            uid = getuid();
+            if (uid)
+                return -EPERM;
+
+            return module_probe(argv[3]);
+        } else {
+            /* modprobe is called without enough arguments */
+            return -EINVAL;
+        }
+    }
 
     /*
      * init sets the umask to 077 for forked processes. We need to
@@ -115,7 +144,7 @@ void set_device_permission(int nargs, char **args)
     mode_t perm;
     uid_t uid;
     gid_t gid;
-    int prefix = 0;
+    int wildcard = 0;
     char *endptr;
     int ret;
     char *tmp = 0;
@@ -127,6 +156,25 @@ void set_device_permission(int nargs, char **args)
         return;
 
     name = args[0];
+
+    if (!strncmp(name, UEV_VPID, strlen(UEV_VPID))) {
+        if (dev_index < MAX_DEV) {
+            if (strlen(args[1]) < DEV_NAME_LEN) {
+                strcpy(dev_id[dev_index].dev_name, args[1]);
+            } else {
+                 ERROR("String too long in ueventd.rc line for '%s'\n", args[1]);
+                 return;
+            }
+            dev_id[dev_index].grp_config = get_android_id(args[3]);
+            dev_id[dev_index].user_config = get_android_id(args[4]);
+            dev_id[dev_index].perm = strtol(args[2], &endptr, 8);
+            dev_index++;
+        } else {
+            NOTICE("%s entry %d is ignored as it exceeds MAX dev supported (%d)\n",
+                 UEV_VPID, dev_index , MAX_DEV);
+        }
+        return;
+    }
 
     if (!strncmp(name,"/sys/", 5) && (nargs == 5)) {
         INFO("/sys/ rule %s %s\n",args[0],args[1]);
@@ -147,10 +195,8 @@ void set_device_permission(int nargs, char **args)
             asprintf(&tmp, "/dev/mtd/mtd%d", n);
         name = tmp;
     } else {
-        int len = strlen(name);
-        if (name[len - 1] == '*') {
-            prefix = 1;
-            name[len - 1] = '\0';
+        if (strchr(name, '*')) {
+            wildcard = 1;
         }
     }
 
@@ -177,6 +223,6 @@ void set_device_permission(int nargs, char **args)
     }
     gid = ret;
 
-    add_dev_perms(name, attr, perm, uid, gid, prefix);
+    add_dev_perms(name, attr, perm, uid, gid, wildcard);
     free(tmp);
 }

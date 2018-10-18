@@ -19,10 +19,26 @@
 
 #include <sys/stat.h>
 
+#define DEV_NAME_LEN       12
+#define MAX_DEV            16
+
 extern void handle_device_fd();
 extern void device_init(void);
+extern int module_probe(const char *alias);
 extern int add_dev_perms(const char *name, const char *attr,
                          mode_t perm, unsigned int uid,
-                         unsigned int gid, unsigned short prefix);
+                         unsigned int gid, unsigned short wildcard);
 int get_device_fd();
+void coldboot(const char *path);
+
+struct dev_prop
+{
+   char dev_name[DEV_NAME_LEN];
+   unsigned int perm;
+   int grp_config;
+   int user_config;
+};
+extern struct dev_prop dev_id[MAX_DEV];
+extern int dev_index;
+
 #endif	/* _INIT_DEVICES_H */

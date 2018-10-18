@@ -151,12 +151,12 @@ out:
     return -1;
 }
 
-/* (8 header words + 247 toc words) = 1020 bytes */
-/* 1024 bytes header and toc + 247 prop_infos @ 128 bytes = 32640 bytes */
+/* (8 header words + 372 toc words) = 1520 bytes */
+/* 1536 bytes header and toc + 372 prop_infos @ 128 bytes = 49152 bytes */
 
-#define PA_COUNT_MAX  247
-#define PA_INFO_START 1024
-#define PA_SIZE       32768
+#define PA_COUNT_MAX  372
+#define PA_INFO_START 1536
+#define PA_SIZE       49152
 
 static workspace pa_workspace;
 static prop_info *pa_info_array;
@@ -502,17 +502,20 @@ static void load_properties(char *data)
     }
 }
 
-static void load_properties_from_file(const char *fn)
+int load_properties_from_file(const char *fn)
 {
     char *data;
     unsigned sz;
 
     data = read_file(fn, &sz);
 
-    if(data != 0) {
-        load_properties(data);
-        free(data);
+    if(data == NULL) {
+        ERROR("Unable to read property file '%s'\n", fn);
+        return -1;
     }
+    load_properties(data);
+    free(data);
+    return 0;
 }
 
 static void load_persistent_properties()

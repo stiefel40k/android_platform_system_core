@@ -207,6 +207,21 @@ fail:
     return NULL;
 }
 
+static struct write_list *
+mk_empty_ptable(void)
+{
+    struct write_list *wr;
+    static const short int magic = 0xAA55;
+
+    wr = alloc_wl(72);
+    if (!wr)
+        return NULL;
+    memset(wr->data, 0, 70);
+    memcpy(wr->data + 70, &magic, sizeof(magic));
+    wr->offset = 440;
+    return wr;
+}
+
 
 struct write_list *
 config_mbr(struct disk_info *dinfo)
@@ -240,11 +255,11 @@ config_mbr(struct disk_info *dinfo)
         }
 
         /* if extended, need 1 lba for ebr */
-        if ((cur_lba + extended) >= dinfo->num_lba)
+        if (dinfo->num_lba && (cur_lba + extended) >= dinfo->num_lba)
             goto nospace;
         else if (pinfo->len_kb != (uint32_t)-1) {
             uint32_t sz_lba = (pinfo->len_kb / dinfo->sect_size) * 1024;
-            if ((cur_lba + sz_lba + extended) > dinfo->num_lba)
+            if (dinfo->num_lba && (cur_lba + sz_lba + extended) > dinfo->num_lba)
                 goto nospace;
         }
 
@@ -274,6 +289,14 @@ config_mbr(struct disk_info *dinfo)
             goto fail;
         }
         wlist_add(&wr_list, temp_wr);
+    }
+
+    /* Prepend to the write list an empty partition table to start with */
+    if ((temp_wr = mk_empty_ptable()))
+        wlist_add(&wr_list, temp_wr);
+    else {
+        ALOGE("Can't create base partition table");
+        goto fail;
     }
 
     return wr_list;

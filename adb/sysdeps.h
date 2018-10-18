@@ -82,6 +82,7 @@ static __inline__ void  close_on_exec(int  fd)
 }
 
 extern void  disable_tcp_nagle(int  fd);
+extern void enable_keepalive(int fd);
 
 #define  lstat    stat   /* no symlinks on Win32 */
 
@@ -105,7 +106,7 @@ static __inline__  int    adb_unlink(const char*  path)
 
 static __inline__ int  adb_mkdir(const char*  path, int mode)
 {
-	return _mkdir(path);
+    return _mkdir(path);
 }
 #undef   mkdir
 #define  mkdir  ___xxx_mkdir
@@ -427,6 +428,13 @@ static __inline__ int  adb_socket_accept(int  serverfd, struct sockaddr*  addr, 
 #undef   accept
 #define  accept  ___xxx_accept
 
+static __inline__ int adb_chown(const char* path, uid_t uid, gid_t gid)
+{
+    return chown(path, uid, gid);
+}
+#undef   chown
+#define  chown  ___xxx_chown
+
 #define  unix_read   adb_read
 #define  unix_write  adb_write
 #define  unix_close  adb_close
@@ -457,6 +465,22 @@ static __inline__ void  disable_tcp_nagle(int fd)
     setsockopt( fd, IPPROTO_TCP, TCP_NODELAY, (void*)&on, sizeof(on) );
 }
 
+static __inline__ void  enable_keepalive(int fd)
+{
+   int optval;
+   socklen_t optlen = sizeof(optval);
+
+   /* Set the option active */
+   optval = 1;
+   optlen = sizeof(optval);
+   setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &optval, optlen);
+   optval = 2;
+   setsockopt(fd, SOL_TCP, TCP_KEEPCNT, &optval, optlen);
+   optval = 2;
+   setsockopt(fd, SOL_TCP, TCP_KEEPIDLE, &optval, optlen);
+   optval = 2;
+   setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, &optval, optlen);
+}
 
 static __inline__ int  unix_socketpair( int  d, int  type, int  protocol, int sv[2] )
 {

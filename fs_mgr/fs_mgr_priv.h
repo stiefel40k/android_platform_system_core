@@ -25,7 +25,7 @@
 
 #define CRYPTO_TMPFS_OPTIONS "size=128m,mode=0771,uid=1000,gid=1000"
 
-#define WAIT_TIMEOUT 5
+#define WAIT_TIMEOUT 20
 
 /* fstab has the following format:
  *

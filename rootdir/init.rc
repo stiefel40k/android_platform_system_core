@@ -40,12 +40,12 @@ loglevel 3
     export BOOTCLASSPATH /system/framework/core.jar:/system/framework/core-junit.jar:/system/framework/bouncycastle.jar:/system/framework/ext.jar:/system/framework/framework.jar:/system/framework/telephony-common.jar:/system/framework/voip-common.jar:/system/framework/mms-common.jar:/system/framework/android.policy.jar:/system/framework/services.jar:/system/framework/apache-xml.jar
 
 # Backward compatibility
-    symlink /system/etc /etc
-    symlink /sys/kernel/debug /d
+    symlink system/etc /etc
+    symlink sys/kernel/debug /d
 
 # Right now vendor lives on the same filesystem as system,
 # but someday that may change.
-    symlink /system/vendor /vendor
+    symlink system/vendor /vendor
 
 # Create cgroup mount point for cpu accounting
     mkdir /acct
@@ -206,6 +206,7 @@ on post-fs-data
     mkdir /data/misc/bluetooth 0770 system system
     mkdir /data/misc/keystore 0700 keystore keystore
     mkdir /data/misc/keychain 0771 system system
+    mkdir /data/misc/radio 0770 system radio
     mkdir /data/misc/sms 0770 system radio
     mkdir /data/misc/zoneinfo 0775 system system
     mkdir /data/misc/vpn 0770 system vpn
