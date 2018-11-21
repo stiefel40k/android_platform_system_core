@@ -183,11 +183,6 @@ raw_cat(int rfd)
 	}
 }
 
-#ifdef WITH_HOUDINI
-extern int houdini_hook_open(const char *path, int flags, int mode);
-#define open houdini_hook_open
-#endif
-
 static void
 raw_args(char **argv)
 {
